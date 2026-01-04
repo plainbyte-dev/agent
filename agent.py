@@ -77,7 +77,7 @@ class BaselineRunner:
         self.config = config or {}
         self.model_id = self.config.get('model', 'gpt-5-mini')
         self.reasoning_effort = self.config.get('reasoning_effort', 'high')  # Default to high for baseline
-        self.api_key = ""
+        self.api_key = "https://github.com/plainbyte-dev/agent/security/secret-scanning/unblock-secret/37nItOpGxsXWha69iBMXEmMp9Te"
 
         if not self.api_key:
             # llm will fall back to other key mechanisms, so this is not a fatal error
