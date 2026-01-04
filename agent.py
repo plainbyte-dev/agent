@@ -77,7 +77,7 @@ class BaselineRunner:
         self.config = config or {}
         self.model_id = self.config.get('model', 'gpt-5-mini')
         self.reasoning_effort = self.config.get('reasoning_effort', 'high')  # Default to high for baseline
-        self.api_key = "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"
+        self.api_key = ""
 
         if not self.api_key:
             # llm will fall back to other key mechanisms, so this is not a fatal error
