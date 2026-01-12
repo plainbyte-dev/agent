@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Bittensor Subnet Miner Agent
-Solves smart contract audit challenges sent by validators
+Standalone Code Audit Agent
+Solves smart contract audit challenges and generates reports
 """
 
 import os
@@ -13,45 +13,25 @@ import tempfile
 import shutil
 from datetime import datetime
 from pathlib import Path
-from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional
-from urllib.parse import urlparse
 import logging
-import subprocess
-import sys
+import requests
 
-try:
-    import requests
-    import bittensor as bt
-except ImportError:
-    print("Install dependencies: pip install bittensor requests")
-
-
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class Finding:
-    """Represents a security finding"""
-    file: str
-    line_number: int
-    severity: str
-    issue_type: str
-    description: str
-    code_snippet: str
-    recommendation: str
 
 
 class SolidityAuditAnalyzer:
     """Analyzes Solidity contracts for security vulnerabilities"""
 
     def __init__(self):
-        self.findings: List[Finding] = []
+        self.findings = []
         self.files_analyzed = 0
         self.files_skipped = 0
         
-        # Comprehensive security patterns
         self.patterns = {
             'reentrancy': {
                 'regex': r'\.call\s*\{[^}]*\}\s*\(\s*\)',
@@ -78,9 +58,8 @@ class SolidityAuditAnalyzer:
                 'recommendation': 'Use Chainlink VRF or similar service'
             },
             'missing_zero_check': {
-                'regex': r'require\s*\(\s*\w+\s*!=\s*address\(0\)\s*\)',
+                'regex': r'address\s+\w+\s*=',
                 'severity': 'medium',
-                'inverse': True,
                 'description': 'Missing zero address validation',
                 'recommendation': 'Validate address parameters are not zero address'
             },
@@ -96,23 +75,23 @@ class SolidityAuditAnalyzer:
                 'description': 'Arbitrary delegatecall detected',
                 'recommendation': 'Restrict delegatecall targets carefully'
             },
-            'missing_event': {
-                'regex': r'function\s+\w+.*\{[^}]*state[^}]*\}',
-                'severity': 'low',
-                'description': 'State-changing function may lack event emission',
-                'recommendation': 'Emit events for all state changes'
-            },
             'floating_pragma': {
                 'regex': r'pragma\s+solidity\s+\^',
                 'severity': 'medium',
                 'description': 'Floating pragma version detected',
                 'recommendation': 'Lock pragma to specific version'
             },
-            'unchecked_arithmetic': {
-                'regex': r'(?<!SafeMath)[\+\-\*](\s*=)?(?!\s*SafeMath)',
+            'unsafe_math': {
+                'regex': r'(?<!SafeMath)\s+\+\s+(?!.*SafeMath)',
                 'severity': 'low',
-                'description': 'Direct arithmetic without SafeMath (Solidity <0.8)',
+                'description': 'Arithmetic without SafeMath (Solidity <0.8)',
                 'recommendation': 'Use SafeMath library or ensure Solidity >=0.8'
+            },
+            'missing_event': {
+                'regex': r'function\s+\w+.*public.*\{[^}]*\s+(balance|amount|state)[^}]*\}',
+                'severity': 'low',
+                'description': 'State-changing function may lack event emission',
+                'recommendation': 'Emit events for all state changes'
             }
         }
 
@@ -129,13 +108,12 @@ class SolidityAuditAnalyzer:
             self.files_analyzed += 1
             lines = content.split('\n')
 
-            # Run all security checks
             for pattern_name, pattern_data in self.patterns.items():
                 self._check_pattern(file_path, content, lines, pattern_name, pattern_data)
 
             return True
         except Exception as e:
-            logger.error(f"Error analyzing {file_path}: {str(e)}")
+            logger.warning(f"Error analyzing {file_path}: {str(e)}")
             self.files_skipped += 1
             return False
 
@@ -143,75 +121,49 @@ class SolidityAuditAnalyzer:
                       pattern_name: str, pattern_data: Dict[str, Any]) -> None:
         """Check content against a security pattern"""
         regex = pattern_data['regex']
-        inverse = pattern_data.get('inverse', False)
         
-        matches = list(re.finditer(regex, content, re.MULTILINE | re.DOTALL))
-        
-        if inverse and not matches:
-            # Pattern not found but it should be - this is the issue
-            line_number = 1
-            snippet = lines[0] if lines else ""
-        else:
-            for match in matches:
+        try:
+            for match in re.finditer(regex, content, re.MULTILINE | re.DOTALL):
                 line_number = content[:match.start()].count('\n') + 1
                 
-                # Get code snippet
                 start_line = max(0, line_number - 2)
                 end_line = min(len(lines), line_number + 2)
                 snippet = '\n'.join(lines[start_line:end_line])
 
-                finding = Finding(
-                    file=file_path,
-                    line_number=line_number,
-                    severity=pattern_data['severity'],
-                    issue_type=pattern_name,
-                    description=pattern_data['description'],
-                    code_snippet=snippet.strip(),
-                    recommendation=pattern_data['recommendation']
-                )
-                
-                self.findings.append(finding)
+                self.findings.append({
+                    'file': file_path,
+                    'line': line_number,
+                    'severity': pattern_data['severity'],
+                    'type': pattern_name,
+                    'description': pattern_data['description'],
+                    'snippet': snippet.strip(),
+                    'recommendation': pattern_data['recommendation']
+                })
+        except re.error:
+            pass
 
     def analyze_directory(self, directory: str) -> None:
         """Analyze all Solidity files in directory"""
         sol_files = list(Path(directory).rglob('*.sol'))
-        
-        logger.info(f"Found {len(sol_files)} Solidity files to analyze")
+        logger.info(f"Found {len(sol_files)} Solidity files")
         
         for sol_file in sol_files:
             self.analyze_file(str(sol_file))
 
-    def get_findings(self) -> List[Dict[str, Any]]:
-        """Return findings as list of dicts"""
-        return [
-            {
-                'file': f.file,
-                'line': f.line_number,
-                'severity': f.severity,
-                'type': f.issue_type,
-                'description': f.description,
-                'snippet': f.code_snippet,
-                'recommendation': f.recommendation
-            }
-            for f in self.findings
-        ]
 
+class AuditAgent:
+    """Standalone audit agent for solving code audit challenges"""
 
-class AuditMinerAgent:
-    """Bittensor subnet miner agent for solving audit challenges"""
-
-    def __init__(self, wallet_name: str = "default", hotkey_name: str = "default"):
-        """Initialize miner agent"""
-        self.wallet_name = wallet_name
-        self.hotkey_name = hotkey_name
+    def __init__(self):
+        """Initialize the audit agent"""
         self.analyzer = SolidityAuditAnalyzer()
-        logger.info("Audit Miner Agent initialized")
+        logger.info("Audit Agent initialized")
 
-    def download_codebase(self, tarball_url: str, temp_dir: str) -> str:
-        """Download and extract codebase from tarball"""
+    def download_codebase(self, tarball_url: str, temp_dir: str) -> Optional[str]:
+        """Download and extract codebase from tarball URL"""
         try:
             logger.info(f"Downloading codebase from {tarball_url}")
-            response = requests.get(tarball_url, timeout=60)
+            response = requests.get(tarball_url, timeout=120, stream=True)
             response.raise_for_status()
             
             tarball_path = os.path.join(temp_dir, "codebase.tar.gz")
@@ -224,64 +176,62 @@ class AuditMinerAgent:
             with tarfile.open(tarball_path, 'r:gz') as tar:
                 tar.extractall(extract_dir)
             
-            # Find the actual code directory
             subdirs = os.listdir(extract_dir)
-            if subdirs:
-                code_dir = os.path.join(extract_dir, subdirs[0])
-            else:
-                code_dir = extract_dir
+            code_dir = os.path.join(extract_dir, subdirs[0]) if subdirs else extract_dir
             
-            logger.info(f"Codebase extracted to {code_dir}")
+            logger.info(f"Codebase extracted successfully")
             return code_dir
         except Exception as e:
             logger.error(f"Error downloading codebase: {str(e)}")
-            raise
+            return None
 
     def solve_challenge(self, challenge: Dict[str, Any]) -> Dict[str, Any]:
-        """Solve an audit challenge"""
+        """Solve an audit challenge and return report"""
         temp_dir = None
         try:
             project_id = challenge.get('project_id', 'unknown')
-            platform = challenge.get('platform', 'unknown')
             project_name = challenge.get('name', 'unknown')
+            platform = challenge.get('platform', 'unknown')
             
-            logger.info(f"Solving challenge for project: {project_name}")
+            logger.info(f"Processing challenge: {project_name} ({project_id})")
             
-            # Create temporary directory
             temp_dir = tempfile.mkdtemp()
             
-            # Process each codebase
-            total_findings = 0
-            all_findings = []
             total_files_analyzed = 0
             total_files_skipped = 0
+            all_findings = []
             repo_urls = []
             
             codebases = challenge.get('codebases', [])
+            logger.info(f"Processing {len(codebases)} codebase(s)")
             
-            for codebase in codebases:
+            for idx, codebase in enumerate(codebases, 1):
                 tarball_url = codebase.get('tarball_url')
                 repo_url = codebase.get('repo_url')
+                codebase_id = codebase.get('codebase_id', f'codebase_{idx}')
                 
                 if not tarball_url:
-                    logger.warning(f"No tarball URL for codebase {codebase.get('codebase_id')}")
+                    logger.warning(f"No tarball URL for {codebase_id}")
                     continue
                 
-                repo_urls.append(repo_url)
+                if repo_url:
+                    repo_urls.append(repo_url)
                 
-                # Download and analyze
                 code_dir = self.download_codebase(tarball_url, temp_dir)
+                if not code_dir:
+                    continue
                 
-                # Analyze codebase
-                self.analyzer.analyze_directory(code_dir)
+                # Reset analyzer for fresh analysis
+                analyzer = SolidityAuditAnalyzer()
+                analyzer.analyze_directory(code_dir)
                 
-                total_files_analyzed += self.analyzer.files_analyzed
-                total_files_skipped += self.analyzer.files_skipped
-                all_findings.extend(self.analyzer.get_findings())
+                total_files_analyzed += analyzer.files_analyzed
+                total_files_skipped += analyzer.files_skipped
+                all_findings.extend(analyzer.findings)
+                
+                logger.info(f"  Analyzed {analyzer.files_analyzed} files, found {len(analyzer.findings)} issues")
             
-            total_findings = len(all_findings)
-            
-            # Generate report in specified format
+            # Generate final report
             report = self._generate_report(
                 project_name=project_name,
                 repo_urls=repo_urls,
@@ -290,14 +240,17 @@ class AuditMinerAgent:
                 findings=all_findings
             )
             
-            logger.info(f"Challenge solved. Found {total_findings} issues")
+            logger.info(f"Challenge completed. Total findings: {len(all_findings)}")
             return report
             
         except Exception as e:
             logger.error(f"Error solving challenge: {str(e)}")
-            raise
+            return {
+                'error': str(e),
+                'project': challenge.get('name', 'unknown'),
+                'timestamp': datetime.utcnow().isoformat()
+            }
         finally:
-            # Cleanup
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
 
@@ -311,7 +264,7 @@ class AuditMinerAgent:
         hash_input = f"{project_name}{files_analyzed}{len(findings)}{timestamp}"
         agent_hash = hashlib.sha256(hash_input.encode()).hexdigest()
         
-        report = {
+        return {
             'project': project_name,
             'timestamp': timestamp,
             'files_analyzed': files_analyzed,
@@ -322,45 +275,58 @@ class AuditMinerAgent:
             '_repo_url': repo_urls[0] if repo_urls else '',
             '_validated_at': datetime.utcnow().isoformat()
         }
-        
-        return report
 
-    def process_challenge_request(self, challenge_json: str) -> Dict[str, Any]:
-        """Process incoming challenge request"""
+    def process_json_challenge(self, challenge_json: str) -> Dict[str, Any]:
+        """Process a JSON challenge string"""
         try:
             challenge = json.loads(challenge_json)
             return self.solve_challenge(challenge)
         except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON challenge: {str(e)}")
+            logger.error(f"Invalid JSON: {str(e)}")
             return {'error': 'Invalid JSON format'}
 
-    def start(self):
-        """Start the miner agent (Bittensor integration)"""
-        logger.info("Starting Audit Miner Agent on Bittensor subnet")
-        # Bittensor registration and synapse handling would go here
-        # This is a simplified version showing the core audit functionality
+    def process_file_challenge(self, file_path: str) -> Dict[str, Any]:
+        """Process a challenge from a JSON file"""
+        try:
+            with open(file_path, 'r') as f:
+                challenge = json.load(f)
+            return self.solve_challenge(challenge)
+        except Exception as e:
+            logger.error(f"Error reading challenge file: {str(e)}")
+            return {'error': str(e)}
 
 
 def main():
+    """Main entry point"""
+    import sys
     import argparse
     
-    parser = argparse.ArgumentParser(description='Bittensor Audit Miner Agent')
-    parser.add_argument('--challenge', type=str, help='Challenge JSON string')
-    parser.add_argument('--challenge-file', type=str, help='Path to challenge JSON file')
-    parser.add_argument('--output', '-o', type=str, help='Output file path')
+    parser = argparse.ArgumentParser(
+        description='Standalone Code Audit Agent',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python agent.py --file challenge.json
+  python agent.py --file challenge.json --output report.json
+  python agent.py --json '{"project_id":"code4rena_iq-ai_2025_03",...}'
+        '''
+    )
+    parser.add_argument('--file', '-f', help='Challenge JSON file path')
+    parser.add_argument('--json', '-j', help='Challenge as JSON string')
+    parser.add_argument('--output', '-o', help='Output report file path')
     
     args = parser.parse_args()
     
-    agent = AuditMinerAgent()
+    agent = AuditAgent()
     
-    if args.challenge:
-        result = agent.process_challenge_request(args.challenge)
-    elif args.challenge_file:
-        with open(args.challenge_file, 'r') as f:
-            challenge = json.load(f)
-        result = agent.solve_challenge(challenge)
+    if args.file:
+        logger.info(f"Loading challenge from file: {args.file}")
+        result = agent.process_file_challenge(args.file)
+    elif args.json:
+        logger.info("Processing JSON challenge")
+        result = agent.process_json_challenge(args.json)
     else:
-        logger.error("Please provide --challenge or --challenge-file")
+        parser.print_help()
         sys.exit(1)
     
     # Output result
