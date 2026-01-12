@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Standalone Code Audit Agent
-Solves smart contract audit challenges and generates reports
+Gemini-Powered Code Audit Agent
+Uses Google's Gemini API to analyze smart contract audit challenges
 """
 
 import os
@@ -17,6 +17,11 @@ from typing import List, Dict, Any, Optional
 import logging
 import requests
 
+try:
+    import google.generativeai as genai
+except ImportError:
+    print("Install Gemini: pip install google-generativeai")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -24,79 +29,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class SolidityAuditAnalyzer:
-    """Analyzes Solidity contracts for security vulnerabilities"""
+class GeminiAuditAnalyzer:
+    """Uses Gemini API to analyze Solidity contracts"""
 
-    def __init__(self):
+    def __init__(self, api_key: str):
+        """Initialize Gemini analyzer with API key"""
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel('gemini-2.0-flash')
         self.findings = []
         self.files_analyzed = 0
         self.files_skipped = 0
-        
-        self.patterns = {
-            'reentrancy': {
-                'regex': r'\.call\s*\{[^}]*\}\s*\(\s*\)',
-                'severity': 'critical',
-                'description': 'Potential reentrancy vulnerability detected',
-                'recommendation': 'Use checks-effects-interactions pattern or reentrancy guard'
-            },
-            'unchecked_call': {
-                'regex': r'(\.call|\.delegatecall|\.staticcall)\s*\(\s*\)',
-                'severity': 'high',
-                'description': 'Unchecked external call may fail silently',
-                'recommendation': 'Always check return value of external calls'
-            },
-            'tx_origin': {
-                'regex': r'\btx\.origin\b',
-                'severity': 'high',
-                'description': 'Use of tx.origin for authorization',
-                'recommendation': 'Use msg.sender instead of tx.origin'
-            },
-            'weak_randomness': {
-                'regex': r'block\.(timestamp|number|difficulty)',
-                'severity': 'medium',
-                'description': 'Weak randomness source detected',
-                'recommendation': 'Use Chainlink VRF or similar service'
-            },
-            'missing_zero_check': {
-                'regex': r'address\s+\w+\s*=',
-                'severity': 'medium',
-                'description': 'Missing zero address validation',
-                'recommendation': 'Validate address parameters are not zero address'
-            },
-            'unchecked_transfer': {
-                'regex': r'\.transfer\s*\(',
-                'severity': 'medium',
-                'description': 'Direct transfer call without return check',
-                'recommendation': 'Use safeTransfer from SafeERC20'
-            },
-            'arbitrary_delegatecall': {
-                'regex': r'delegatecall\s*\(',
-                'severity': 'critical',
-                'description': 'Arbitrary delegatecall detected',
-                'recommendation': 'Restrict delegatecall targets carefully'
-            },
-            'floating_pragma': {
-                'regex': r'pragma\s+solidity\s+\^',
-                'severity': 'medium',
-                'description': 'Floating pragma version detected',
-                'recommendation': 'Lock pragma to specific version'
-            },
-            'unsafe_math': {
-                'regex': r'(?<!SafeMath)\s+\+\s+(?!.*SafeMath)',
-                'severity': 'low',
-                'description': 'Arithmetic without SafeMath (Solidity <0.8)',
-                'recommendation': 'Use SafeMath library or ensure Solidity >=0.8'
-            },
-            'missing_event': {
-                'regex': r'function\s+\w+.*public.*\{[^}]*\s+(balance|amount|state)[^}]*\}',
-                'severity': 'low',
-                'description': 'State-changing function may lack event emission',
-                'recommendation': 'Emit events for all state changes'
-            }
-        }
 
     def analyze_file(self, file_path: str) -> bool:
-        """Analyze a single Solidity file"""
+        """Analyze a single Solidity file using Gemini"""
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
@@ -106,58 +51,135 @@ class SolidityAuditAnalyzer:
                 return False
 
             self.files_analyzed += 1
-            lines = content.split('\n')
-
-            for pattern_name, pattern_data in self.patterns.items():
-                self._check_pattern(file_path, content, lines, pattern_name, pattern_data)
-
+            
+            # Prepare prompt for Gemini
+            prompt = self._prepare_analysis_prompt(file_path, content)
+            
+            # Call Gemini API
+            response = self.model.generate_content(prompt)
+            analysis_result = response.text
+            
+            # Parse Gemini response
+            self._parse_gemini_findings(file_path, content, analysis_result)
+            
+            logger.info(f"Analyzed {file_path}")
             return True
+            
         except Exception as e:
             logger.warning(f"Error analyzing {file_path}: {str(e)}")
             self.files_skipped += 1
             return False
 
-    def _check_pattern(self, file_path: str, content: str, lines: List[str],
-                      pattern_name: str, pattern_data: Dict[str, Any]) -> None:
-        """Check content against a security pattern"""
-        regex = pattern_data['regex']
-        
+    def _prepare_analysis_prompt(self, file_path: str, content: str) -> str:
+        """Prepare analysis prompt for Gemini"""
+        prompt = f"""Analyze this Solidity smart contract for security vulnerabilities and code issues.
+
+File: {file_path}
+
+Code:
+```solidity
+{content}
+```
+
+For each issue found, provide the following in JSON format:
+{{
+  "issues": [
+    {{
+      "title": "Issue title",
+      "description": "Detailed description",
+      "vulnerability_type": "Type of vulnerability",
+      "severity": "critical|high|medium|low",
+      "confidence": 0.0-1.0,
+      "line_number": line_number,
+      "code_snippet": "relevant code",
+      "recommendation": "How to fix"
+    }}
+  ]
+}}
+
+Focus on:
+1. Reentrancy vulnerabilities
+2. Unchecked external calls
+3. TX.origin usage
+4. Weak randomness
+5. Missing validations
+6. Integer overflow/underflow
+7. Access control issues
+8. Logic errors
+9. Gas optimization issues
+10. Best practice violations
+
+Be thorough but realistic. Only report actual issues you can identify."""
+
+        return prompt
+
+    def _parse_gemini_findings(self, file_path: str, content: str, response_text: str) -> None:
+        """Parse Gemini response and extract findings"""
         try:
-            for match in re.finditer(regex, content, re.MULTILINE | re.DOTALL):
-                line_number = content[:match.start()].count('\n') + 1
+            # Extract JSON from response
+            json_match = re.search(r'\{[\s\S]*"issues"[\s\S]*\}', response_text)
+            
+            if not json_match:
+                logger.warning(f"Could not extract JSON from Gemini response for {file_path}")
+                return
+            
+            json_str = json_match.group(0)
+            data = json.loads(json_str)
+            
+            lines = content.split('\n')
+            
+            for issue in data.get('issues', []):
+                line_number = issue.get('line_number', 1)
                 
+                # Get code snippet context
                 start_line = max(0, line_number - 2)
                 end_line = min(len(lines), line_number + 2)
                 snippet = '\n'.join(lines[start_line:end_line])
-
-                self.findings.append({
+                
+                # Generate unique ID
+                finding_id = hashlib.sha256(
+                    f"{file_path}{line_number}{issue.get('title')}".encode()
+                ).hexdigest()[:16]
+                
+                finding = {
+                    'title': issue.get('title', 'Security Issue'),
+                    'description': issue.get('description', ''),
+                    'vulnerability_type': issue.get('vulnerability_type', 'unknown'),
+                    'severity': issue.get('severity', 'medium').lower(),
+                    'confidence': float(issue.get('confidence', 0.8)),
+                    'location': f"{file_path}:{line_number}",
                     'file': file_path,
                     'line': line_number,
-                    'severity': pattern_data['severity'],
-                    'type': pattern_name,
-                    'description': pattern_data['description'],
-                    'snippet': snippet.strip(),
-                    'recommendation': pattern_data['recommendation']
-                })
-        except re.error:
-            pass
+                    'code_snippet': snippet.strip(),
+                    'recommendation': issue.get('recommendation', ''),
+                    'id': finding_id,
+                    'reported_by_model': 'gemini-2.0-flash',
+                    'status': 'identified'
+                }
+                
+                self.findings.append(finding)
+                
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON from Gemini response: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error parsing Gemini findings: {str(e)}")
 
     def analyze_directory(self, directory: str) -> None:
         """Analyze all Solidity files in directory"""
         sol_files = list(Path(directory).rglob('*.sol'))
-        logger.info(f"Found {len(sol_files)} Solidity files")
+        logger.info(f"Found {len(sol_files)} Solidity files to analyze")
         
         for sol_file in sol_files:
             self.analyze_file(str(sol_file))
 
 
-class AuditAgent:
-    """Standalone audit agent for solving code audit challenges"""
+class GeminiAuditAgent:
+    """Audit agent powered by Gemini API"""
 
-    def __init__(self):
-        """Initialize the audit agent"""
-        self.analyzer = SolidityAuditAnalyzer()
-        logger.info("Audit Agent initialized")
+    def __init__(self, api_key: str):
+        """Initialize the audit agent with Gemini API key"""
+        self.api_key = api_key
+        logger.info("Gemini Audit Agent initialized")
 
     def download_codebase(self, tarball_url: str, temp_dir: str) -> Optional[str]:
         """Download and extract codebase from tarball URL"""
@@ -186,7 +208,7 @@ class AuditAgent:
             return None
 
     def solve_challenge(self, challenge: Dict[str, Any]) -> Dict[str, Any]:
-        """Solve an audit challenge and return report"""
+        """Solve an audit challenge using Gemini API"""
         temp_dir = None
         try:
             project_id = challenge.get('project_id', 'unknown')
@@ -221,8 +243,8 @@ class AuditAgent:
                 if not code_dir:
                     continue
                 
-                # Reset analyzer for fresh analysis
-                analyzer = SolidityAuditAnalyzer()
+                # Create analyzer with Gemini API
+                analyzer = GeminiAuditAnalyzer(self.api_key)
                 analyzer.analyze_directory(code_dir)
                 
                 total_files_analyzed += analyzer.files_analyzed
@@ -248,7 +270,11 @@ class AuditAgent:
             return {
                 'error': str(e),
                 'project': challenge.get('name', 'unknown'),
-                'timestamp': datetime.utcnow().isoformat()
+                'timestamp': datetime.utcnow().isoformat(),
+                'files_analyzed': 0,
+                'files_skipped': 0,
+                'total_findings': 0,
+                'findings': []
             }
         finally:
             if temp_dir and os.path.exists(temp_dir):
@@ -257,7 +283,7 @@ class AuditAgent:
     def _generate_report(self, project_name: str, repo_urls: List[str],
                         files_analyzed: int, files_skipped: int,
                         findings: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate audit report in specified format"""
+        """Generate audit report in required format"""
         timestamp = datetime.utcnow().isoformat()
         
         # Generate agent hash
@@ -276,67 +302,66 @@ class AuditAgent:
             '_validated_at': datetime.utcnow().isoformat()
         }
 
-    def process_json_challenge(self, challenge_json: str) -> Dict[str, Any]:
-        """Process a JSON challenge string"""
-        try:
-            challenge = json.loads(challenge_json)
-            return self.solve_challenge(challenge)
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON: {str(e)}")
-            return {'error': 'Invalid JSON format'}
 
-    def process_file_challenge(self, file_path: str) -> Dict[str, Any]:
-        """Process a challenge from a JSON file"""
-        try:
-            with open(file_path, 'r') as f:
-                challenge = json.load(f)
-            return self.solve_challenge(challenge)
-        except Exception as e:
-            logger.error(f"Error reading challenge file: {str(e)}")
-            return {'error': str(e)}
-
-
-def main():
-    """Main entry point"""
-    import sys
-    import argparse
+def main(tasks: Dict[str, Any], api_key: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Main entry point for validator-agent communication.
+    Uses Gemini API to analyze smart contract audit challenges.
     
-    parser = argparse.ArgumentParser(
-        description='Standalone Code Audit Agent',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
-Examples:
-  python agent.py --file challenge.json
-  python agent.py --file challenge.json --output report.json
-  python agent.py --json '{"project_id":"code4rena_iq-ai_2025_03",...}'
-        '''
-    )
-    parser.add_argument('--file', '-f', help='Challenge JSON file path')
-    parser.add_argument('--json', '-j', help='Challenge as JSON string')
-    parser.add_argument('--output', '-o', help='Output report file path')
+    Args:
+        tasks: Dictionary containing audit challenge details from validator
+        api_key: Gemini API key (from environment if not provided)
     
-    args = parser.parse_args()
+    Returns:
+        Audit report with findings in required format
+    """
+    # Get API key from parameter or environment
+    gemini_key = api_key or os.getenv('GEMINI_API_KEY')
     
-    agent = AuditAgent()
+    if not gemini_key:
+        logger.error("GEMINI_API_KEY not provided or set in environment")
+        return {
+            'error': 'GEMINI_API_KEY not provided',
+            'project': tasks.get('name', 'unknown'),
+            'timestamp': datetime.utcnow().isoformat(),
+            'files_analyzed': 0,
+            'files_skipped': 0,
+            'total_findings': 0,
+            'findings': []
+        }
     
-    if args.file:
-        logger.info(f"Loading challenge from file: {args.file}")
-        result = agent.process_file_challenge(args.file)
-    elif args.json:
-        logger.info("Processing JSON challenge")
-        result = agent.process_json_challenge(args.json)
-    else:
-        parser.print_help()
-        sys.exit(1)
-    
-    # Output result
-    if args.output:
-        with open(args.output, 'w') as f:
-            json.dump(result, f, indent=2)
-        logger.info(f"Report saved to {args.output}")
-    else:
-        print(json.dumps(result, indent=2))
+    try:
+        agent = GeminiAuditAgent(gemini_key)
+        result = agent.solve_challenge(tasks)
+        
+        logger.info(f"Task completed with {result.get('total_findings', 0)} findings")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Fatal error in main: {str(e)}")
+        return {
+            'error': str(e),
+            'project': tasks.get('name', 'unknown'),
+            'timestamp': datetime.utcnow().isoformat(),
+            'files_analyzed': 0,
+            'files_skipped': 0,
+            'total_findings': 0,
+            'findings': []
+        }
 
 
 if __name__ == "__main__":
-    main()
+    # For local testing
+    import sys
+    
+    if len(sys.argv) > 1:
+        challenge_file = sys.argv[1]
+        with open(challenge_file, 'r') as f:
+            challenge = json.load(f)
+        
+        api_key = os.getenv('GEMINI_API_KEY')
+        result = main(challenge, api_key)
+        print(json.dumps(result, indent=2))
+    else:
+        print("Usage: python agent.py <challenge_file.json>")
+        print("Requires GEMINI_API_KEY environment variable")
