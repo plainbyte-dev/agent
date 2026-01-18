@@ -35,7 +35,7 @@ class GeminiAuditAnalyzer:
     def __init__(self, api_key: str):
         """Initialize Gemini analyzer with API key"""
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash')
+        self.model = genai.GenerativeModel('gemini-2.5-flash')
         self.findings = []
         self.files_analyzed = 0
         self.files_skipped = 0
@@ -56,7 +56,8 @@ class GeminiAuditAnalyzer:
             prompt = self._prepare_analysis_prompt(file_path, content)
             
             # Call Gemini API
-            response = self.model.generate_content(prompt)
+            generation_config = {"response_mime_type": "application/json"}
+            response = self.model.generate_content(prompt, generation_config=generation_config)
             analysis_result = response.text
             
             # Parse Gemini response
@@ -153,7 +154,7 @@ Be thorough but realistic. Only report actual issues you can identify."""
                     'code_snippet': snippet.strip(),
                     'recommendation': issue.get('recommendation', ''),
                     'id': finding_id,
-                    'reported_by_model': 'gemini-2.0-flash',
+                    'reported_by_model': 'gemini-1.5-flash',
                     'status': 'identified'
                 }
                 
@@ -342,13 +343,16 @@ def main(tasks: Dict[str, Any], api_key: Optional[str] = None) -> Dict[str, Any]
         return {
             'error': str(e),
             'project': tasks.get('name', 'unknown'),
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'files_analyzed': 0,
             'files_skipped': 0,
             'total_findings': 0,
             'findings': []
         }
 
+
+
+run = main
 
 if __name__ == "__main__":
     # For local testing
