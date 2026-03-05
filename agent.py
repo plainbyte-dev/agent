@@ -12,7 +12,7 @@ import hashlib
 import tarfile
 import tempfile
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -49,7 +49,7 @@ def _short_hash(*parts: str) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +172,17 @@ class SolidityAnalyser:
             logger.warning("JSON parse error for %s: %s", path, exc)
             return
 
+        # Gemini sometimes returns a bare array instead of {"issues": [...]}
+        if isinstance(data, list):
+            issues = data
+        elif isinstance(data, dict):
+            issues = data.get("issues", [])
+        else:
+            logger.warning("Unexpected JSON shape for %s: %s", path, type(data))
+            return
+
         lines = source.splitlines()
-        for issue in data.get("issues", []):
+        for issue in issues:
             line_no   = max(1, int(issue.get("line_number", 1)))
             ctx_start = max(0, line_no - 3)
             ctx_end   = min(len(lines), line_no + 3)
@@ -276,7 +285,7 @@ class AuditOrchestrator:
                     continue
 
                 analyser = SolidityAnalyser(self._api_key)
-                analyser.analyse_directory(code_dir, max_files=max_files)
+                analyser.analyse_directory(code_dir, max_files=2)
 
                 total_analysed += analyser.files_analysed
                 total_skipped  += analyser.files_skipped
@@ -298,16 +307,16 @@ class AuditOrchestrator:
         self,
         project_name:   str,
         repo_urls:      List[str],
-        files_analysed: int,
+        files_analyzed: int,
         files_skipped:  int,
         findings:       List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         ts         = _now_iso()
-        agent_hash = _short_hash(project_name, str(files_analysed), str(len(findings)), ts)
+        agent_hash = _short_hash(project_name, str(files_analyzed), str(len(findings)), ts)
         return {
             "project":        project_name,
             "timestamp":      ts,
-            "files_analyzed": files_analysed,
+            "files_analyzed": files_analyzed,
             "files_skipped":  files_skipped,
             "total_findings": len(findings),
             "findings":       findings,
@@ -379,5 +388,5 @@ if __name__ == "__main__":
         print("Usage: python agent.py <challenge.json>")
     else:
         challenge_data = json.JSONDecoder().decode(Path(sys.argv[1]).read_text())
-        report         = main(challenge_data, os.getenv("GEMINI_API_KEY", ""))
+        report         = main(challenge_data, os.getenv("GEMINI_API_KEY", "AIzaSyCqvuFTpFEwkontWcP6jvVfQN0DzEhBrFQ"))
         print(json.dumps(report, indent=2))
