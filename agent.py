@@ -5,6 +5,8 @@ Analyses Solidity codebases for security vulnerabilities using the Gemini API.
 """
 
 import re
+import io
+import gzip
 import json
 import hashlib
 import tarfile
@@ -144,7 +146,7 @@ class SolidityAnalyser:
     def _ingest_response(self, path: Path, source: str, raw: str) -> None:
         cleaned = re.sub(r"^```[a-z]*\n?|```$", "", raw.strip(), flags=re.MULTILINE)
         try:
-            data = json.loads(cleaned)
+            data = json.JSONDecoder().decode(cleaned)
         except json.JSONDecodeError as exc:
             logger.warning("JSON parse error for %s: %s", path, exc)
             return
@@ -199,9 +201,12 @@ class CodebaseFetcher:
         dest.mkdir(parents=True, exist_ok=True)
 
         try:
-            with tarfile.open(archive, "r:gz") as tar:
-                tar.extractall(dest)
-        except tarfile.TarError as exc:
+            compressed = io.BytesIO(archive.read_bytes())
+            with gzip.GzipFile(fileobj=compressed) as gz_fobj:
+                tf = tarfile.TarFile(fileobj=gz_fobj)
+                tf.extractall(str(dest))
+                tf.close()
+        except (tarfile.TarError, OSError) as exc:
             logger.error("Extraction failed for '%s': %s", label, exc)
             return None
 
@@ -353,6 +358,6 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python agent.py <challenge.json>")
     else:
-        challenge_data = json.loads(Path(sys.argv[1]).read_text())
+        challenge_data = json.JSONDecoder().decode(Path(sys.argv[1]).read_text())
         report         = main(challenge_data, os.getenv("GEMINI_API_KEY", ""))
         print(json.dumps(report, indent=2))
