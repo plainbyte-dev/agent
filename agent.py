@@ -285,7 +285,7 @@ class AuditOrchestrator:
                     continue
 
                 analyser = SolidityAnalyser(self._api_key)
-                analyser.analyse_directory(code_dir, max_files=2)
+                analyser.analyse_directory(code_dir, max_files=max_files)
 
                 total_analysed += analyser.files_analysed
                 total_skipped  += analyser.files_skipped
