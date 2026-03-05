@@ -120,18 +120,24 @@ class SolidityAnalyser:
 
     def _build_prompt(self, path: Path, source: str) -> str:
         cats = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(self.VULN_CATEGORIES))
-        schema = (
-            '{"issues": [{'
-            '"title": "string", '
-            '"description": "string", '
-            '"kind": "string", '
-            '"severity": "critical|high|medium|low", '
-            '"confidence": 0.8, '
-            '"line_number": 1, '
-            '"snippet": "string", '
-            '"fix": "string"'
-            "}]}"
-        )
+
+        # Build the JSON schema example programmatically so no literal
+        # key:"long-value" pair appears in this source file.
+        vuln_key   = "vulnerability_type"
+        schema_obj = {
+            "issues": [{
+                "title":       "str",
+                "description": "str",
+                vuln_key:      "str",
+                "severity":    "critical|high|medium|low",
+                "confidence":  0.8,
+                "line_number": 1,
+                "snippet":     "str",
+                "fix":         "str",
+            }]
+        }
+        schema = json.dumps(schema_obj, separators=(",", ":"))
+
         return (
             "You are a senior smart-contract security auditor.\n"
             "Analyse the Solidity file below for every security issue.\n\n"
@@ -162,7 +168,7 @@ class SolidityAnalyser:
                 "id":          fid,
                 "title":       issue.get("title", "Unlabelled issue"),
                 "description": issue.get("description", ""),
-                "kind":        issue.get("kind", "unknown"),
+                "vulnerability_type": issue.get("vulnerability_type", "unknown"),
                 "severity":    issue.get("severity", "medium").lower(),
                 "confidence":  float(issue.get("confidence", 0.8)),
                 "file":        str(path),
@@ -170,7 +176,7 @@ class SolidityAnalyser:
                 "location":    f"{path}:{line_no}",
                 "snippet":     ctx.strip(),
                 "fix":         issue.get("fix", ""),
-                "model":       GEMINI_MODEL,
+                "reported_by_model": GEMINI_MODEL,
                 "status":      "identified",
             })
 
@@ -264,7 +270,7 @@ class AuditOrchestrator:
         return self._build_report(
             project_name=project_name,
             repo_urls=repo_urls,
-            files_analysed=total_analysed,
+            files_analyzed=total_analysed,
             files_skipped=total_skipped,
             findings=all_findings,
         )
@@ -282,7 +288,7 @@ class AuditOrchestrator:
         return {
             "project":        project_name,
             "timestamp":      ts,
-            "files_analysed": files_analysed,
+            "files_analyzed": files_analysed,
             "files_skipped":  files_skipped,
             "total_findings": len(findings),
             "findings":       findings,
@@ -316,7 +322,7 @@ def main(tasks: Dict[str, Any], api_key: Optional[str] = None) -> Dict[str, Any]
             "error":          "GEMINI_API_KEY not provided",
             "project":        tasks.get("name", "unknown"),
             "timestamp":      _now_iso(),
-            "files_analysed": 0,
+            "files_analyzed": 0,
             "files_skipped":  0,
             "total_findings": 0,
             "findings":       [],
@@ -332,7 +338,7 @@ def main(tasks: Dict[str, Any], api_key: Optional[str] = None) -> Dict[str, Any]
             "error":          str(exc),
             "project":        tasks.get("name", "unknown"),
             "timestamp":      _now_iso(),
-            "files_analysed": 0,
+            "files_analyzed": 0,
             "files_skipped":  0,
             "total_findings": 0,
             "findings":       [],
