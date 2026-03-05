@@ -179,41 +179,36 @@ class SolidityAnalyser:
 # Codebase downloader
 # ---------------------------------------------------------------------------
 
-class CodebaseFetcher:
-    """Downloads and extracts a tarball into a caller-managed temp directory."""
+def _fetch_codebase(tarball_url: str, label: str, tmp_root: Path) -> Optional[Path]:
+    """Download tarball_url, extract under tmp_root, return the code root."""
+    logger.info("Downloading '%s' from %s", label, tarball_url)
+    try:
+        resp = requests.get(tarball_url, timeout=REQUEST_TIMEOUT, stream=True)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.error("Download failed for '%s': %s", label, exc)
+        return None
 
-    def __init__(self, tmp_root: Path) -> None:
-        self._tmp_root = tmp_root
+    archive = tmp_root / f"{label}.tar.gz"
+    archive.write_bytes(resp.content)
 
-    def fetch(self, tarball_url: str, label: str) -> Optional[Path]:
-        logger.info("Downloading '%s' from %s", label, tarball_url)
-        try:
-            resp = requests.get(tarball_url, timeout=REQUEST_TIMEOUT, stream=True)
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            logger.error("Download failed for '%s': %s", label, exc)
-            return None
+    dest = tmp_root / label
+    dest.mkdir(parents=True, exist_ok=True)
 
-        archive = self._tmp_root / f"{label}.tar.gz"
-        archive.write_bytes(resp.content)
+    try:
+        compressed = io.BytesIO(archive.read_bytes())
+        with gzip.GzipFile(fileobj=compressed) as gz_fobj:
+            tf = tarfile.TarFile(fileobj=gz_fobj)
+            tf.extractall(str(dest))
+            tf.close()
+    except (tarfile.TarError, OSError) as exc:
+        logger.error("Extraction failed for '%s': %s", label, exc)
+        return None
 
-        dest = self._tmp_root / label
-        dest.mkdir(parents=True, exist_ok=True)
-
-        try:
-            compressed = io.BytesIO(archive.read_bytes())
-            with gzip.GzipFile(fileobj=compressed) as gz_fobj:
-                tf = tarfile.TarFile(fileobj=gz_fobj)
-                tf.extractall(str(dest))
-                tf.close()
-        except (tarfile.TarError, OSError) as exc:
-            logger.error("Extraction failed for '%s': %s", label, exc)
-            return None
-
-        children = list(dest.iterdir())
-        if len(children) == 1 and children[0].is_dir():
-            return children[0]
-        return dest
+    children = list(dest.iterdir())
+    if len(children) == 1 and children[0].is_dir():
+        return children[0]
+    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +232,7 @@ class AuditOrchestrator:
         repo_urls:     List[str] = []
 
         with tempfile.TemporaryDirectory() as tmp:
-            fetcher = CodebaseFetcher(Path(tmp))
+            tmp_path = Path(tmp)
 
             for idx, codebase in enumerate(challenge.get("codebases", []), start=1):
                 tarball_url = codebase.get("tarball_url")
@@ -251,7 +246,7 @@ class AuditOrchestrator:
                     logger.warning("No tarball_url for '%s' — skipping", cb_id)
                     continue
 
-                code_dir = fetcher.fetch(tarball_url, cb_id)
+                code_dir = _fetch_codebase(tarball_url, cb_id, tmp_path)
                 if code_dir is None:
                     continue
 
@@ -274,8 +269,8 @@ class AuditOrchestrator:
             findings=all_findings,
         )
 
-    @staticmethod
     def _build_report(
+        self,
         project_name:   str,
         repo_urls:      List[str],
         files_analysed: int,
