@@ -81,9 +81,24 @@ class SolidityAnalyser:
         self.files_analysed = 0
         self.files_skipped  = 0
 
-    def analyse_directory(self, directory: Path) -> None:
-        sol_files = list(directory.rglob("*.sol"))
-        logger.info("Found %d .sol file(s) in %s", len(sol_files), directory)
+    def analyse_directory(self, directory: Path, max_files: int = 0) -> None:
+        """Analyse up to *max_files* .sol files (0 = no limit).
+        Files are sorted largest-first so the most complex code is prioritised
+        when the set is truncated.
+        """
+        sol_files = sorted(
+            directory.rglob("*.sol"),
+            key=lambda p: p.stat().st_size,
+            reverse=True,
+        )
+        if max_files > 0:
+            skipped_count = max(0, len(sol_files) - max_files)
+            sol_files     = sol_files[:max_files]
+            self.files_skipped += skipped_count
+        logger.info(
+            "Analysing %d .sol file(s) in %s (limit=%s)",
+            len(sol_files), directory, max_files or "none",
+        )
         for path in sol_files:
             self._analyse_file(path)
 
@@ -230,7 +245,11 @@ class AuditOrchestrator:
     def run(self, challenge: Dict[str, Any]) -> Dict[str, Any]:
         project_name = challenge.get("name", "unknown")
         project_id   = challenge.get("project_id", "unknown")
-        logger.info("Starting audit: %s (%s)", project_name, project_id)
+        max_files    = int(challenge.get("max_files", 0))  # 0 = no limit
+        logger.info(
+            "Starting audit: %s (%s) | max_files=%s",
+            project_name, project_id, max_files or "unlimited",
+        )
 
         total_analysed = 0
         total_skipped  = 0
@@ -257,7 +276,7 @@ class AuditOrchestrator:
                     continue
 
                 analyser = SolidityAnalyser(self._api_key)
-                analyser.analyse_directory(code_dir)
+                analyser.analyse_directory(code_dir, max_files=max_files)
 
                 total_analysed += analyser.files_analysed
                 total_skipped  += analyser.files_skipped
