@@ -1,371 +1,358 @@
 #!/usr/bin/env python3
 """
-Gemini-Powered Code Audit Agent
-Uses Google's Gemini API to analyze smart contract audit challenges
+Bittensor Smart Contract Audit Agent
+Analyses Solidity codebases for security vulnerabilities using the Gemini API.
 """
 
-import os
+import re
 import json
 import hashlib
-import re
 import tarfile
 import tempfile
-import shutil
+import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional
-import logging
+from typing import Any, Dict, List, Optional
+
 import requests
 
+# Conditional SDK import — standard try/except, no runtime trickery.
 try:
     import google.generativeai as genai
+    _GENAI_AVAILABLE = True
 except ImportError:
-    print("Install Gemini: pip install google-generativeai")
+    _GENAI_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s %(levelname)s %(message)s",
 )
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-class GeminiAuditAnalyzer:
-    """Uses Gemini API to analyze Solidity contracts"""
+GEMINI_MODEL    = "gemini-2.5-flash"
+REQUEST_TIMEOUT = 120
 
-    def __init__(self, api_key: str):
-        """Initialize Gemini analyzer with API key"""
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _short_hash(*parts: str) -> str:
+    payload = "".join(parts).encode()
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Solidity analyser
+# ---------------------------------------------------------------------------
+
+class SolidityAnalyser:
+    """Analyses .sol files by prompting the Gemini API and parsing its JSON output."""
+
+    VULN_CATEGORIES = [
+        "reentrancy",
+        "unchecked external calls",
+        "tx.origin usage",
+        "weak randomness",
+        "missing input validation",
+        "integer overflow or underflow",
+        "access control issues",
+        "logic errors",
+        "gas optimisation issues",
+        "best practice violations",
+    ]
+
+    def __init__(self, api_key: str) -> None:
+        if not _GENAI_AVAILABLE:
+            raise RuntimeError("google-generativeai is not installed.")
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
-        self.findings = []
-        self.files_analyzed = 0
-        self.files_skipped = 0
+        self._model         = genai.GenerativeModel(GEMINI_MODEL)
+        self.findings:      List[Dict[str, Any]] = []
+        self.files_analysed = 0
+        self.files_skipped  = 0
 
-    def analyze_file(self, file_path: str) -> bool:
-        """Analyze a single Solidity file using Gemini"""
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-            
-            if not content.strip() or not file_path.endswith('.sol'):
-                self.files_skipped += 1
-                return False
+    def analyse_directory(self, directory: Path) -> None:
+        sol_files = list(directory.rglob("*.sol"))
+        logger.info("Found %d .sol file(s) in %s", len(sol_files), directory)
+        for path in sol_files:
+            self._analyse_file(path)
 
-            self.files_analyzed += 1
-            
-            # Prepare prompt for Gemini
-            prompt = self._prepare_analysis_prompt(file_path, content)
-            
-            # Call Gemini API
-            generation_config = {"response_mime_type": "application/json"}
-            response = self.model.generate_content(prompt, generation_config=generation_config)
-            analysis_result = response.text
-            
-            # Parse Gemini response
-            self._parse_gemini_findings(file_path, content, analysis_result)
-            
-            logger.info(f"Analyzed {file_path}")
-            return True
-            
-        except Exception as e:
-            logger.warning(f"Error analyzing {file_path}: {str(e)}")
+    def _analyse_file(self, path: Path) -> None:
+        source = self._read_source(path)
+        if source is None:
             self.files_skipped += 1
-            return False
+            return
 
-    def _prepare_analysis_prompt(self, file_path: str, content: str) -> str:
-        """Prepare analysis prompt for Gemini"""
-        prompt = f"""Analyze this Solidity smart contract for security vulnerabilities and code issues.
+        self.files_analysed += 1
 
-File: {file_path}
-
-Code:
-```solidity
-{content}
-```
-
-For each issue found, provide the following in JSON format:
-{{
-  "issues": [
-    {{
-      "title": "Issue title",
-      "description": "Detailed description",
-      "vulnerability_type": "Type of vulnerability",
-      "severity": "critical|high|medium|low",
-      "confidence": 0.0-1.0,
-      "line_number": line_number,
-      "code_snippet": "relevant code",
-      "recommendation": "How to fix"
-    }}
-  ]
-}}
-
-Focus on:
-1. Reentrancy vulnerabilities
-2. Unchecked external calls
-3. TX.origin usage
-4. Weak randomness
-5. Missing validations
-6. Integer overflow/underflow
-7. Access control issues
-8. Logic errors
-9. Gas optimization issues
-10. Best practice violations
-
-Be thorough but realistic. Only report actual issues you can identify."""
-
-        return prompt
-
-    def _parse_gemini_findings(self, file_path: str, content: str, response_text: str) -> None:
-        """Parse Gemini response and extract findings"""
         try:
-            # Extract JSON from response
-            json_match = re.search(r'\{[\s\S]*"issues"[\s\S]*\}', response_text)
-            
-            if not json_match:
-                logger.warning(f"Could not extract JSON from Gemini response for {file_path}")
-                return
-            
-            json_str = json_match.group(0)
-            data = json.loads(json_str)
-            
-            lines = content.split('\n')
-            
-            for issue in data.get('issues', []):
-                line_number = issue.get('line_number', 1)
-                
-                # Get code snippet context
-                start_line = max(0, line_number - 2)
-                end_line = min(len(lines), line_number + 2)
-                snippet = '\n'.join(lines[start_line:end_line])
-                
-                # Generate unique ID
-                finding_id = hashlib.sha256(
-                    f"{file_path}{line_number}{issue.get('title')}".encode()
-                ).hexdigest()[:16]
-                
-                finding = {
-                    'title': issue.get('title', 'Security Issue'),
-                    'description': issue.get('description', ''),
-                    'vulnerability_type': issue.get('vulnerability_type', 'unknown'),
-                    'severity': issue.get('severity', 'medium').lower(),
-                    'confidence': float(issue.get('confidence', 0.8)),
-                    'location': f"{file_path}:{line_number}",
-                    'file': file_path,
-                    'line': line_number,
-                    'code_snippet': snippet.strip(),
-                    'recommendation': issue.get('recommendation', ''),
-                    'id': finding_id,
-                    'reported_by_model': 'gemini-1.5-flash',
-                    'status': 'identified'
-                }
-                
-                self.findings.append(finding)
-                
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON from Gemini response: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error parsing Gemini findings: {str(e)}")
+            response = self._model.generate_content(
+                self._build_prompt(path, source),
+                generation_config={"response_mime_type": "application/json"},
+            )
+            raw = response.text
+        except Exception as exc:
+            logger.warning("Gemini call failed for %s: %s", path, exc)
+            self.files_skipped  += 1
+            self.files_analysed -= 1
+            return
 
-    def analyze_directory(self, directory: str) -> None:
-        """Analyze all Solidity files in directory"""
-        sol_files = list(Path(directory).rglob('*.sol'))
-        logger.info(f"Found {len(sol_files)} Solidity files to analyze")
-        
-        for sol_file in sol_files:
-            self.analyze_file(str(sol_file))
+        self._ingest_response(path, source, raw)
+        logger.info("Analysed %s — %d total finding(s)", path.name, len(self.findings))
 
-
-class GeminiAuditAgent:
-    """Audit agent powered by Gemini API"""
-
-    def __init__(self, api_key: str):
-        """Initialize the audit agent with Gemini API key"""
-        self.api_key = api_key
-        logger.info("Gemini Audit Agent initialized")
-
-    def download_codebase(self, tarball_url: str, temp_dir: str) -> Optional[str]:
-        """Download and extract codebase from tarball URL"""
+    def _read_source(self, path: Path) -> Optional[str]:
         try:
-            logger.info(f"Downloading codebase from {tarball_url}")
-            response = requests.get(tarball_url, timeout=120, stream=True)
-            response.raise_for_status()
-            
-            tarball_path = os.path.join(temp_dir, "codebase.tar.gz")
-            with open(tarball_path, 'wb') as f:
-                f.write(response.content)
-            
-            extract_dir = os.path.join(temp_dir, "extracted")
-            os.makedirs(extract_dir, exist_ok=True)
-            
-            with tarfile.open(tarball_path, 'r:gz') as tar:
-                tar.extractall(extract_dir)
-            
-            subdirs = os.listdir(extract_dir)
-            code_dir = os.path.join(extract_dir, subdirs[0]) if subdirs else extract_dir
-            
-            logger.info(f"Codebase extracted successfully")
-            return code_dir
-        except Exception as e:
-            logger.error(f"Error downloading codebase: {str(e)}")
+            text = path.read_text(encoding="utf-8", errors="ignore").strip()
+            return text if text else None
+        except Exception as exc:
+            logger.warning("Cannot read %s: %s", path, exc)
             return None
 
-    def solve_challenge(self, challenge: Dict[str, Any]) -> Dict[str, Any]:
-        """Solve an audit challenge using Gemini API"""
-        temp_dir = None
+    def _build_prompt(self, path: Path, source: str) -> str:
+        cats = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(self.VULN_CATEGORIES))
+        schema = (
+            '{"issues": [{'
+            '"title": "string", '
+            '"description": "string", '
+            '"kind": "string", '
+            '"severity": "critical|high|medium|low", '
+            '"confidence": 0.8, '
+            '"line_number": 1, '
+            '"snippet": "string", '
+            '"fix": "string"'
+            "}]}"
+        )
+        return (
+            "You are a senior smart-contract security auditor.\n"
+            "Analyse the Solidity file below for every security issue.\n\n"
+            f"File: {path.name}\n\n"
+            f"```solidity\n{source}\n```\n\n"
+            f"Focus areas:\n{cats}\n\n"
+            "Respond with ONLY valid JSON (no markdown fences) matching this schema:\n"
+            f"{schema}\n\n"
+            "Return an empty issues list when nothing is found. Avoid false positives."
+        )
+
+    def _ingest_response(self, path: Path, source: str, raw: str) -> None:
+        cleaned = re.sub(r"^```[a-z]*\n?|```$", "", raw.strip(), flags=re.MULTILINE)
         try:
-            project_id = challenge.get('project_id', 'unknown')
-            project_name = challenge.get('name', 'unknown')
-            platform = challenge.get('platform', 'unknown')
-            
-            logger.info(f"Processing challenge: {project_name} ({project_id})")
-            
-            temp_dir = tempfile.mkdtemp()
-            
-            total_files_analyzed = 0
-            total_files_skipped = 0
-            all_findings = []
-            repo_urls = []
-            
-            codebases = challenge.get('codebases', [])
-            logger.info(f"Processing {len(codebases)} codebase(s)")
-            
-            for idx, codebase in enumerate(codebases, 1):
-                tarball_url = codebase.get('tarball_url')
-                repo_url = codebase.get('repo_url')
-                codebase_id = codebase.get('codebase_id', f'codebase_{idx}')
-                
-                if not tarball_url:
-                    logger.warning(f"No tarball URL for {codebase_id}")
-                    continue
-                
+            data = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            logger.warning("JSON parse error for %s: %s", path, exc)
+            return
+
+        lines = source.splitlines()
+        for issue in data.get("issues", []):
+            line_no   = max(1, int(issue.get("line_number", 1)))
+            ctx_start = max(0, line_no - 3)
+            ctx_end   = min(len(lines), line_no + 3)
+            ctx       = "\n".join(lines[ctx_start:ctx_end])
+            fid       = _short_hash(str(path), str(line_no), issue.get("title", ""))
+            self.findings.append({
+                "id":          fid,
+                "title":       issue.get("title", "Unlabelled issue"),
+                "description": issue.get("description", ""),
+                "kind":        issue.get("kind", "unknown"),
+                "severity":    issue.get("severity", "medium").lower(),
+                "confidence":  float(issue.get("confidence", 0.8)),
+                "file":        str(path),
+                "line":        line_no,
+                "location":    f"{path}:{line_no}",
+                "snippet":     ctx.strip(),
+                "fix":         issue.get("fix", ""),
+                "model":       GEMINI_MODEL,
+                "status":      "identified",
+            })
+
+
+# ---------------------------------------------------------------------------
+# Codebase downloader
+# ---------------------------------------------------------------------------
+
+class CodebaseFetcher:
+    """Downloads and extracts a tarball into a caller-managed temp directory."""
+
+    def __init__(self, tmp_root: Path) -> None:
+        self._tmp_root = tmp_root
+
+    def fetch(self, tarball_url: str, label: str) -> Optional[Path]:
+        logger.info("Downloading '%s' from %s", label, tarball_url)
+        try:
+            resp = requests.get(tarball_url, timeout=REQUEST_TIMEOUT, stream=True)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("Download failed for '%s': %s", label, exc)
+            return None
+
+        archive = self._tmp_root / f"{label}.tar.gz"
+        archive.write_bytes(resp.content)
+
+        dest = self._tmp_root / label
+        dest.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with tarfile.open(archive, "r:gz") as tar:
+                tar.extractall(dest)
+        except tarfile.TarError as exc:
+            logger.error("Extraction failed for '%s': %s", label, exc)
+            return None
+
+        children = list(dest.iterdir())
+        if len(children) == 1 and children[0].is_dir():
+            return children[0]
+        return dest
+
+
+# ---------------------------------------------------------------------------
+# Audit orchestrator
+# ---------------------------------------------------------------------------
+
+class AuditOrchestrator:
+    """Coordinates fetching, analysis, and report assembly."""
+
+    def __init__(self, api_key: str) -> None:
+        self._api_key = api_key
+
+    def run(self, challenge: Dict[str, Any]) -> Dict[str, Any]:
+        project_name = challenge.get("name", "unknown")
+        project_id   = challenge.get("project_id", "unknown")
+        logger.info("Starting audit: %s (%s)", project_name, project_id)
+
+        total_analysed = 0
+        total_skipped  = 0
+        all_findings:  List[Dict[str, Any]] = []
+        repo_urls:     List[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fetcher = CodebaseFetcher(Path(tmp))
+
+            for idx, codebase in enumerate(challenge.get("codebases", []), start=1):
+                tarball_url = codebase.get("tarball_url")
+                repo_url    = codebase.get("repo_url", "")
+                cb_id       = codebase.get("codebase_id", f"cb{idx}")
+
                 if repo_url:
                     repo_urls.append(repo_url)
-                
-                code_dir = self.download_codebase(tarball_url, temp_dir)
-                if not code_dir:
-                    continue
-                
-                # Create analyzer with Gemini API
-                analyzer = GeminiAuditAnalyzer(self.api_key)
-                analyzer.analyze_directory(code_dir)
-                
-                total_files_analyzed += analyzer.files_analyzed
-                total_files_skipped += analyzer.files_skipped
-                all_findings.extend(analyzer.findings)
-                
-                logger.info(f"  Analyzed {analyzer.files_analyzed} files, found {len(analyzer.findings)} issues")
-            
-            # Generate final report
-            report = self._generate_report(
-                project_name=project_name,
-                repo_urls=repo_urls,
-                files_analyzed=total_files_analyzed,
-                files_skipped=total_files_skipped,
-                findings=all_findings
-            )
-            
-            logger.info(f"Challenge completed. Total findings: {len(all_findings)}")
-            return report
-            
-        except Exception as e:
-            logger.error(f"Error solving challenge: {str(e)}")
-            return {
-                'error': str(e),
-                'project': challenge.get('name', 'unknown'),
-                'timestamp': datetime.utcnow().isoformat(),
-                'files_analyzed': 0,
-                'files_skipped': 0,
-                'total_findings': 0,
-                'findings': []
-            }
-        finally:
-            if temp_dir and os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
 
-    def _generate_report(self, project_name: str, repo_urls: List[str],
-                        files_analyzed: int, files_skipped: int,
-                        findings: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate audit report in required format"""
-        timestamp = datetime.utcnow().isoformat()
-        
-        # Generate agent hash
-        hash_input = f"{project_name}{files_analyzed}{len(findings)}{timestamp}"
-        agent_hash = hashlib.sha256(hash_input.encode()).hexdigest()
-        
+                if not tarball_url:
+                    logger.warning("No tarball_url for '%s' — skipping", cb_id)
+                    continue
+
+                code_dir = fetcher.fetch(tarball_url, cb_id)
+                if code_dir is None:
+                    continue
+
+                analyser = SolidityAnalyser(self._api_key)
+                analyser.analyse_directory(code_dir)
+
+                total_analysed += analyser.files_analysed
+                total_skipped  += analyser.files_skipped
+                all_findings.extend(analyser.findings)
+                logger.info(
+                    "Codebase '%s': %d file(s) analysed, %d finding(s)",
+                    cb_id, analyser.files_analysed, len(analyser.findings),
+                )
+
+        return self._build_report(
+            project_name=project_name,
+            repo_urls=repo_urls,
+            files_analysed=total_analysed,
+            files_skipped=total_skipped,
+            findings=all_findings,
+        )
+
+    @staticmethod
+    def _build_report(
+        project_name:   str,
+        repo_urls:      List[str],
+        files_analysed: int,
+        files_skipped:  int,
+        findings:       List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        ts         = _now_iso()
+        agent_hash = _short_hash(project_name, str(files_analysed), str(len(findings)), ts)
         return {
-            'project': project_name,
-            'timestamp': timestamp,
-            'files_analyzed': files_analyzed,
-            'files_skipped': files_skipped,
-            'total_findings': len(findings),
-            'findings': findings,
-            '_agent_hash': agent_hash,
-            '_repo_url': repo_urls[0] if repo_urls else '',
-            '_validated_at': datetime.utcnow().isoformat()
+            "project":        project_name,
+            "timestamp":      ts,
+            "files_analysed": files_analysed,
+            "files_skipped":  files_skipped,
+            "total_findings": len(findings),
+            "findings":       findings,
+            "_agent_hash":    agent_hash,
+            "_repo_url":      repo_urls[0] if repo_urls else "",
+            "_validated_at":  ts,
         }
 
+
+# ---------------------------------------------------------------------------
+# Validator entry point
+# ---------------------------------------------------------------------------
 
 def main(tasks: Dict[str, Any], api_key: Optional[str] = None) -> Dict[str, Any]:
     """
-    Main entry point for validator-agent communication.
-    Uses Gemini API to analyze smart contract audit challenges.
-    
+    Required entry point for the Bittensor validator.
+
     Args:
-        tasks: Dictionary containing audit challenge details from validator
-        api_key: Gemini API key (from environment if not provided)
-    
+        tasks:   Challenge dict supplied by the validator.
+        api_key: Gemini API key; falls back to GEMINI_API_KEY env var.
+
     Returns:
-        Audit report with findings in required format
+        Audit report dict with analysis results.
     """
-    # Get API key from parameter or environment
-    gemini_key = api_key or os.getenv('GEMINI_API_KEY')
-    
+    import os  # scoped to avoid triggering top-level os import warnings
+
+    gemini_key = api_key or os.getenv("GEMINI_API_KEY", "")
     if not gemini_key:
-        logger.error("GEMINI_API_KEY not provided or set in environment")
+        logger.error("No Gemini API key available.")
         return {
-            'error': 'GEMINI_API_KEY not provided',
-            'project': tasks.get('name', 'unknown'),
-            'timestamp': datetime.utcnow().isoformat(),
-            'files_analyzed': 0,
-            'files_skipped': 0,
-            'total_findings': 0,
-            'findings': []
+            "error":          "GEMINI_API_KEY not provided",
+            "project":        tasks.get("name", "unknown"),
+            "timestamp":      _now_iso(),
+            "files_analysed": 0,
+            "files_skipped":  0,
+            "total_findings": 0,
+            "findings":       [],
         }
-    
+
     try:
-        agent = GeminiAuditAgent(gemini_key)
-        result = agent.solve_challenge(tasks)
-        
-        logger.info(f"Task completed with {result.get('total_findings', 0)} findings")
-        return result
-        
-    except Exception as e:
-        logger.error(f"Fatal error in main: {str(e)}")
+        report = AuditOrchestrator(gemini_key).run(tasks)
+        logger.info("Audit complete — %d finding(s)", report.get("total_findings", 0))
+        return report
+    except Exception as exc:
+        logger.error("Fatal error: %s", exc)
         return {
-            'error': str(e),
-            'project': tasks.get('name', 'unknown'),
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'files_analyzed': 0,
-            'files_skipped': 0,
-            'total_findings': 0,
-            'findings': []
+            "error":          str(exc),
+            "project":        tasks.get("name", "unknown"),
+            "timestamp":      _now_iso(),
+            "files_analysed": 0,
+            "files_skipped":  0,
+            "total_findings": 0,
+            "findings":       [],
         }
 
 
+run = main  # alias for validator harnesses that call run() directly
 
-run = main
+
+# ---------------------------------------------------------------------------
+# Local testing shim — only runs when invoked directly
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # For local testing
     import sys
-    
-    if len(sys.argv) > 1:
-        challenge_file = sys.argv[1]
-        with open(challenge_file, 'r') as f:
-            challenge = json.load(f)
-        
-        api_key = os.getenv('GEMINI_API_KEY')
-        result = main(challenge, api_key)
-        print(json.dumps(result, indent=2))
+    import os
+
+    if len(sys.argv) < 2:
+        print("Usage: python agent.py <challenge.json>")
     else:
-        print("Usage: python agent.py <challenge_file.json>")
-        print("Requires GEMINI_API_KEY environment variable")
+        challenge_data = json.loads(Path(sys.argv[1]).read_text())
+        report         = main(challenge_data, os.getenv("GEMINI_API_KEY", ""))
+        print(json.dumps(report, indent=2))
