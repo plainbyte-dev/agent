@@ -68,7 +68,7 @@ import google.generativeai as genai
 CHALLENGE_ID   = os.environ.get("CHALLENGE_ID",   "unknown")
 PROJECT_ID     = os.environ.get("PROJECT_ID",     "unknown")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL_NAME     = "gemini-2.0-flash"
+MODEL_NAME     = "gemini-2.5-pro"
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
