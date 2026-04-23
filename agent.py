@@ -28,11 +28,11 @@ CHALLENGE_ID   = os.environ.get("CHALLENGE_ID",   "unknown")
 PROJECT_ID     = os.environ.get("PROJECT_ID",     "unknown")
 CHALLENGE_NAME = os.environ.get("CHALLENGE_NAME", "unknown")
 PLATFORM       = os.environ.get("PLATFORM",       "unknown")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAlLCPfuYp3UMaDbqoZxLxQHTiASTYHIhA")
 
 CHALLENGE_DIR  = Path("/challenge")
 MAX_FILE_CHARS = 40_000
-MODEL_NAME     = "gemini-2.0-flash"
+MODEL_NAME     = "gemini-2.0-pro"
 MAX_TURNS      = 20
 # Leave a buffer before the sandbox's 100 s hard kill
 GEMINI_TIMEOUT_S = int(os.getenv("GEMINI_TIMEOUT", "85"))
